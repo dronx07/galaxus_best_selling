@@ -30,7 +30,7 @@ CAT = [
     "office-stationary"
 ]
 
-TARGET = 10000
+TARGET = 10
 CONCURRENCY = 25
 PROXY = os.getenv("PROXY")
 RETRIES = 3
@@ -190,10 +190,16 @@ async def post_with_retry(session, url, payload, headers):
     for i in range(RETRIES):
         try:
             r = await session.post(url, json=payload, headers=headers, proxy=PROXY)
+            if r is None:
+                raise Exception("Response is None")
+            if getattr(r, "status_code", 200) != 200:
+                logging.warning(f"[HTTP_{r.status_code}] retry={i}")
             return r
         except Exception as e:
+            logging.warning(f"[RETRY] attempt={i} err={e}")
             if i == RETRIES - 1:
-                raise e
+                logging.error(f"[RETRY_FAIL] {url}")
+                return None
             await asyncio.sleep(1)
     return None
 
@@ -203,15 +209,29 @@ async def fetch_page(session, payload, cat, cursor):
 
         r = await post_with_retry(session, BASE_URL, payload, HEADERS)
 
+        if r is None:
+            logging.error(f"[LIST_FAIL] cat={cat} -> response is None")
+            return None
+
         text = r.text
         if isinstance(text, bytes):
             text = text.decode("utf-8", "ignore")
 
-        data = json.loads(text)
-        print(data)
+        if not text or text.strip() == "":
+            logging.error(f"[EMPTY_RESPONSE] cat={cat} status={getattr(r, 'status_code', 'NA')}")
+            return None
+
+        logging.debug(f"[RAW_RESPONSE_SNIPPET] {text[:300]}")
+
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError as je:
+            logging.error(f"[JSON_ERROR] cat={cat} err={je}")
+            logging.error(f"[BAD_RESPONSE_SNIPPET] {text[:500]}")
+            return None
 
         if not isinstance(data, dict) or "data" not in data:
-            logging.error(f"[LIST_BLOCK] cat={cat}")
+            logging.error(f"[LIST_BLOCK] cat={cat} keys={list(data.keys()) if isinstance(data, dict) else 'NOT_DICT'}")
             return None
 
         logging.info(f"[LIST_OK] cat={cat}")
@@ -263,16 +283,30 @@ async def fetch_detail(session, product, sem, i, sector_id):
                     "adventCalendarEnabled": False
                 }
             }
-            
+
             r = await post_with_retry(session, DETAIL_URL, payload, HEADERS)
 
+            if r is None:
+                logging.error(f"[DETAIL_FAIL] {i} response None")
+                return product
+
             text = r.text
+            print(text)
             if isinstance(text, bytes):
                 text = text.decode("utf-8", "ignore")
 
-            data = json.loads(text)
-            print(data)
-            
+            if not text or text.strip() == "":
+                logging.error(f"[DETAIL_EMPTY] {i} {product['product_link']}")
+                return product
+
+            try:
+                data = json.loads(text)
+                print(data)
+            except json.JSONDecodeError as je:
+                logging.error(f"[DETAIL_JSON_ERROR] {i} err={je}")
+                logging.error(f"[DETAIL_BAD_SNIPPET] {text[:500]}")
+                return product
+
             product["product_gtin"] = (
                 data.get("data", {})
                     .get("product", {})
@@ -310,9 +344,9 @@ def save(products):
 async def main():
     idx = load_state()
     cat = CAT[idx % len(CAT)]
-    params = {"http_version":"v2", "allow_redirects":True, "timeout": 60}
+    params = {"http_version": "v2", "allow_redirects": True, "timeout": 60}
 
-    async with AsyncSession(impersonate="chrome142", proxy=PROXY , **params) as session:
+    async with AsyncSession(impersonate="chrome142", proxy=PROXY, **params) as session:
         products = await collect_products(session, cat)
 
     products = await enrich(products, cat)
