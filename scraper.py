@@ -159,7 +159,7 @@ def extract_products(data):
         try:
             n = e["node"]
             results.append({
-                "product_name": n["name"],
+                "product_name": n["brand"]["name"] + " " + n["name"],
                 "supplier_price": n["price"]["amountInclusive"],
                 "product_link": SITE + n["relativeUrl"],
             })
