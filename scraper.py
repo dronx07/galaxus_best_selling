@@ -31,7 +31,7 @@ CAT = [
 ]
 
 TARGET = 10000
-CONCURRENCY = 100
+CONCURRENCY = 25
 PROXY = os.getenv("PROXY")
 RETRIES = 3
 
@@ -263,7 +263,7 @@ async def fetch_detail(session, product, sem, i, sector_id):
                     "adventCalendarEnabled": False
                 }
             }
-
+            
             r = await post_with_retry(session, DETAIL_URL, payload, HEADERS)
 
             text = r.text
