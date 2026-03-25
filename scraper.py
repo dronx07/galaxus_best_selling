@@ -31,7 +31,7 @@ CAT = [
 ]
 
 TARGET = 10000
-CONCURRENCY = 25
+CONCURRENCY = 5
 PROXY = os.getenv("PROXY")
 RETRIES = 3
 
@@ -221,8 +221,6 @@ async def fetch_page(session, payload, cat, cursor):
             logging.error(f"[EMPTY_RESPONSE] cat={cat} status={getattr(r, 'status_code', 'NA')}")
             return None
 
-        logging.debug(f"[RAW_RESPONSE_SNIPPET] {text[:300]}")
-
         try:
             data = json.loads(text)
         except json.JSONDecodeError as je:
@@ -231,7 +229,7 @@ async def fetch_page(session, payload, cat, cursor):
             return None
 
         if not isinstance(data, dict) or "data" not in data:
-            logging.error(f"[LIST_BLOCK] cat={cat} keys={list(data.keys()) if isinstance(data, dict) else 'NOT_DICT'}")
+            logging.error(f"[LIST_BLOCK] cat={cat}")
             return None
 
         logging.info(f"[LIST_OK] cat={cat}")
@@ -269,6 +267,8 @@ async def fetch_detail(session, product, sem, i, sector_id):
     async with sem:
         try:
             logging.info(f"[DETAIL_START] {i} {product['product_link']}")
+            await asyncio.sleep(0.5)
+
             payload = {
                 "variables": {
                     "slug": product["slug"],
@@ -284,32 +284,59 @@ async def fetch_detail(session, product, sem, i, sector_id):
                 }
             }
 
-            r = await post_with_retry(session, DETAIL_URL, payload, HEADERS)
+            data = None
 
-            if r is None:
-                logging.error(f"[DETAIL_FAIL] {i} response None")
+            for attempt in range(3):
+                r = await post_with_retry(session, DETAIL_URL, payload, HEADERS)
+
+                if r is None:
+                    continue
+
+                text = r.text
+                if isinstance(text, bytes):
+                    text = text.decode("utf-8", "ignore")
+
+                if not text or text.strip() == "":
+                    logging.error(f"[DETAIL_EMPTY] {i}")
+                    continue
+
+                if "Access Denied" in text:
+                    logging.warning(f"[AKAMAI_BLOCK] {i} attempt={attempt}")
+                    await asyncio.sleep(2 + attempt)
+                    continue
+
+                try:
+                    data = json.loads(text)
+                    break
+                except json.JSONDecodeError:
+                    logging.error(f"[DETAIL_JSON_ERROR] {i}")
+                    logging.error(f"[DETAIL_BAD_SNIPPET] {text[:300]}")
+                    return product
+
+            if not data:
+                logging.error(f"[DETAIL_GIVEUP] {i}")
                 return product
 
-            text = r.text
-            if isinstance(text, bytes):
-                text = text.decode("utf-8", "ignore")
+            product_data = data.get("data", {}).get("product", {})
 
-            if not text or text.strip() == "":
-                logging.error(f"[DETAIL_EMPTY] {i} {product['product_link']}")
-                return product
+            gtin = product_data.get("gtin")
 
-            try:
-                data = json.loads(text)
-            except json.JSONDecodeError as je:
-                logging.error(f"[DETAIL_JSON_ERROR] {i} err={je}")
-                logging.error(f"[DETAIL_BAD_SNIPPET] {text[:500]}")
-                return product
+            if not gtin:
+                gtin = product_data.get("ean")
 
-            product["product_gtin"] = (
-                data.get("data", {})
-                    .get("product", {})
-                    .get("gtin")
-            )
+            if not gtin:
+                gtins = product_data.get("gtins")
+                if isinstance(gtins, list) and gtins:
+                    gtin = gtins[0]
+
+            if not gtin:
+                identifiers = product_data.get("identifiers", [])
+                for ident in identifiers:
+                    if ident.get("type", "").lower() in ["gtin", "ean"]:
+                        gtin = ident.get("value")
+                        break
+
+            product["product_gtin"] = gtin
 
             logging.info(f"[DETAIL_OK] {i}")
 
@@ -327,6 +354,7 @@ async def enrich(products, cat):
     params = {"http_version": "v2", "allow_redirects": True, "timeout": 60}
 
     async with AsyncSession(impersonate="chrome142", proxy=PROXY, **params) as session:
+        await session.get("https://www.galaxus.fr/")
         tasks = [fetch_detail(session, p, sem, i, sector_id) for i, p in enumerate(products)]
         out = await asyncio.gather(*tasks)
 
