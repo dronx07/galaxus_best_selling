@@ -1,11 +1,11 @@
 import asyncio
+from curl_cffi.requests import AsyncSession
+from dotenv import load_dotenv
+from datetime import datetime, timezone
+from dateutil.relativedelta import relativedelta
 import json
 import logging
 import os
-from dotenv import load_dotenv
-from curl_cffi.requests import AsyncSession
-from datetime import datetime, timezone
-from dateutil.relativedelta import relativedelta
 
 logging.basicConfig(
     level=logging.INFO,
@@ -27,11 +27,10 @@ CAT = [
     "sports",
     "toys",
     "health-beauty",
-    "office-stationary"
 ]
 
 TARGET = 10000
-CONCURRENCY = 5
+CONCURRENCY = 100
 PROXY = os.getenv("PROXY")
 RETRIES = 3
 
@@ -113,13 +112,6 @@ TEMPLATE = {
         "first": 60,
         "sectorId": "U2VjdG9yCmk2",
         "asPath": "/en/s6/sector/health-beauty-6"
-    },
-    "office-stationary": {
-        "id": "TmF2aWdhdGlvbkl0ZW0KZHNhOnJldGFpbC9zOjEy",
-        "sortOrder": "LOWEST_PRICE",
-        "first": 60,
-        "sectorId": "U2VjdG9yCmkxMg==",
-        "asPath": "/en/s12/sector/office-stationery-12"
     }
 }
 
@@ -170,8 +162,6 @@ def extract_products(data):
                 "product_name": n["name"],
                 "supplier_price": n["price"]["amountInclusive"],
                 "product_link": SITE + n["relativeUrl"],
-                "slug": n["relativeUrl"],
-                "product_gtin": None
             })
         except Exception as e:
             logging.warning(e)
@@ -188,16 +178,10 @@ async def post_with_retry(session, url, payload, headers):
     for i in range(RETRIES):
         try:
             r = await session.post(url, json=payload, headers=headers, proxy=PROXY)
-            if r is None:
-                raise Exception("Response is None")
-            if getattr(r, "status_code", 200) != 200:
-                logging.warning(f"[HTTP_{r.status_code}] retry={i}")
             return r
         except Exception as e:
-            logging.warning(f"[RETRY] attempt={i} err={e}")
             if i == RETRIES - 1:
-                logging.error(f"[RETRY_FAIL] {url}")
-                return None
+                raise e
             await asyncio.sleep(1)
     return None
 
@@ -207,24 +191,11 @@ async def fetch_page(session, payload, cat, cursor):
 
         r = await post_with_retry(session, BASE_URL, payload, HEADERS)
 
-        if r is None:
-            logging.error(f"[LIST_FAIL] cat={cat} -> response is None")
-            return None
-
         text = r.text
         if isinstance(text, bytes):
             text = text.decode("utf-8", "ignore")
 
-        if not text or text.strip() == "":
-            logging.error(f"[EMPTY_RESPONSE] cat={cat} status={getattr(r, 'status_code', 'NA')}")
-            return None
-
-        try:
-            data = json.loads(text)
-        except json.JSONDecodeError as je:
-            logging.error(f"[JSON_ERROR] cat={cat} err={je}")
-            logging.error(f"[BAD_RESPONSE_SNIPPET] {text[:500]}")
-            return None
+        data = json.loads(text)
 
         if not isinstance(data, dict) or "data" not in data:
             logging.error(f"[LIST_BLOCK] cat={cat}")
@@ -261,104 +232,6 @@ async def collect_products(session, cat):
 
     return results[:TARGET]
 
-async def fetch_detail(session, product, sem, i, sector_id):
-    async with sem:
-        try:
-            logging.info(f"[DETAIL_START] {i} {product['product_link']}")
-            await asyncio.sleep(0.5)
-
-            payload = {
-                "variables": {
-                    "slug": product["slug"],
-                    "offer": None,
-                    "shopArea": "RETAIL",
-                    "sectorId": sector_id,
-                    "tagIds": [],
-                    "path": product["slug"],
-                    "olderThan3MonthTimestamp": get_iso_timestamp(3),
-                    "isSSR": False,
-                    "hasTrustLevelLowAndIsNotEProcurement": False,
-                    "adventCalendarEnabled": False
-                }
-            }
-
-            data = None
-
-            for attempt in range(3):
-                r = await post_with_retry(session, DETAIL_URL, payload, HEADERS)
-
-                if r is None:
-                    continue
-
-                text = r.text
-                if isinstance(text, bytes):
-                    text = text.decode("utf-8", "ignore")
-
-                if not text or text.strip() == "":
-                    logging.error(f"[DETAIL_EMPTY] {i}")
-                    continue
-
-                if "Access Denied" in text:
-                    logging.warning(f"[AKAMAI_BLOCK] {i} attempt={attempt}")
-                    await asyncio.sleep(2 + attempt)
-                    continue
-
-                try:
-                    data = json.loads(text)
-                    break
-                except json.JSONDecodeError:
-                    logging.error(f"[DETAIL_JSON_ERROR] {i}")
-                    logging.error(f"[DETAIL_BAD_SNIPPET] {text[:300]}")
-                    return product
-
-            if not data:
-                logging.error(f"[DETAIL_GIVEUP] {i}")
-                return product
-
-            product_data = data.get("data", {}).get("product", {})
-
-            gtin = product_data.get("gtin")
-
-            if not gtin:
-                gtin = product_data.get("ean")
-
-            if not gtin:
-                gtins = product_data.get("gtins")
-                if isinstance(gtins, list) and gtins:
-                    gtin = gtins[0]
-
-            if not gtin:
-                identifiers = product_data.get("identifiers", [])
-                for ident in identifiers:
-                    if ident.get("type", "").lower() in ["gtin", "ean"]:
-                        gtin = ident.get("value")
-                        break
-
-            product["product_gtin"] = gtin
-
-            logging.info(f"[DETAIL_OK] {i}")
-
-        except Exception as e:
-            logging.error(f"[DETAIL_FAIL] {i} {product['product_link']} err={e}")
-
-        return product
-
-async def enrich(products, cat):
-    sem = asyncio.Semaphore(CONCURRENCY)
-    logging.info(f"[ENRICH_START] {len(products)}")
-
-    sector_id = TEMPLATE[cat]["sectorId"]
-
-    params = {"http_version": "v2", "allow_redirects": True, "timeout": 60}
-
-    async with AsyncSession(impersonate="chrome142", proxy=PROXY, **params) as session:
-        await session.get("https://www.galaxus.fr/")
-        tasks = [fetch_detail(session, p, sem, i, sector_id) for i, p in enumerate(products)]
-        out = await asyncio.gather(*tasks)
-
-    logging.info("[ENRICH_DONE]")
-    return out
-
 def save(products):
     with open("products.json", "w", encoding="utf-8") as f:
         json.dump(products, f, ensure_ascii=False, indent=2)
@@ -368,12 +241,11 @@ def save(products):
 async def main():
     idx = load_state()
     cat = CAT[idx % len(CAT)]
+
     params = {"http_version": "v2", "allow_redirects": True, "timeout": 60}
 
     async with AsyncSession(impersonate="chrome142", proxy=PROXY, **params) as session:
         products = await collect_products(session, cat)
-
-    products = await enrich(products, cat)
 
     save(products)
 
