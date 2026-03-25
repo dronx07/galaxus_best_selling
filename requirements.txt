@@ -1,0 +1,3 @@
+python-dotenv
+python-dateutil
+curl-cffi
