@@ -30,7 +30,7 @@ CAT = [
     "office-stationary"
 ]
 
-TARGET = 10
+TARGET = 10000
 CONCURRENCY = 25
 PROXY = os.getenv("PROXY")
 RETRIES = 3
@@ -291,7 +291,6 @@ async def fetch_detail(session, product, sem, i, sector_id):
                 return product
 
             text = r.text
-            print(text)
             if isinstance(text, bytes):
                 text = text.decode("utf-8", "ignore")
 
@@ -301,7 +300,6 @@ async def fetch_detail(session, product, sem, i, sector_id):
 
             try:
                 data = json.loads(text)
-                print(data)
             except json.JSONDecodeError as je:
                 logging.error(f"[DETAIL_JSON_ERROR] {i} err={je}")
                 logging.error(f"[DETAIL_BAD_SNIPPET] {text[:500]}")
