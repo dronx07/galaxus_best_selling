@@ -208,6 +208,7 @@ async def fetch_page(session, payload, cat, cursor):
             text = text.decode("utf-8", "ignore")
 
         data = json.loads(text)
+        print(data)
 
         if not isinstance(data, dict) or "data" not in data:
             logging.error(f"[LIST_BLOCK] cat={cat}")
@@ -270,6 +271,8 @@ async def fetch_detail(session, product, sem, i, sector_id):
                 text = text.decode("utf-8", "ignore")
 
             data = json.loads(text)
+            print(data)
+            
             product["product_gtin"] = (
                 data.get("data", {})
                     .get("product", {})
